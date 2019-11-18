@@ -19,6 +19,7 @@ import android.telephony.TelephonyManager;
 import android.text.TextUtils;
 import android.util.Log;
 
+import androidx.core.app.NotificationManagerCompat;
 import io.flutter.plugin.common.PluginRegistry.ActivityResultListener;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -60,7 +61,8 @@ public class PermissionHandlerPlugin implements MethodCallHandler {
   private static final int PERMISSION_GROUP_SPEECH = 13;
   private static final int PERMISSION_GROUP_STORAGE = 14;
   private static final int PERMISSION_GROUP_IGNORE_BATTERY_OPTIMIZATIONS = 15;
-  private static final int PERMISSION_GROUP_UNKNOWN = 16;
+  private static final int PERMISSION_GROUP_NOTIFICATION = 16;
+  private static final int PERMISSION_GROUP_UNKNOWN = 17;
 
   private PermissionHandlerPlugin(Registrar mRegistrar) {
     this.mRegistrar = mRegistrar;
@@ -84,6 +86,7 @@ public class PermissionHandlerPlugin implements MethodCallHandler {
       PERMISSION_GROUP_SPEECH,
       PERMISSION_GROUP_STORAGE,
       PERMISSION_GROUP_IGNORE_BATTERY_OPTIMIZATIONS,
+      PERMISSION_GROUP_NOTIFICATION,
       PERMISSION_GROUP_UNKNOWN,
   })
   private @interface PermissionGroup {
@@ -166,6 +169,8 @@ public class PermissionHandlerPlugin implements MethodCallHandler {
       case Manifest.permission.WRITE_CONTACTS:
       case Manifest.permission.GET_ACCOUNTS:
         return PERMISSION_GROUP_CONTACTS;
+      case Manifest.permission.ACCESS_BACKGROUND_LOCATION:
+        return PERMISSION_GROUP_LOCATION_ALWAYS;
       case Manifest.permission.ACCESS_COARSE_LOCATION:
       case Manifest.permission.ACCESS_FINE_LOCATION:
         return PERMISSION_GROUP_LOCATION;
@@ -177,7 +182,7 @@ public class PermissionHandlerPlugin implements MethodCallHandler {
       case Manifest.permission.WRITE_CALL_LOG:
       case Manifest.permission.ADD_VOICEMAIL:
       case Manifest.permission.USE_SIP:
-      case Manifest.permission.PROCESS_OUTGOING_CALLS:
+      case Manifest.permission.BIND_CALL_REDIRECTION_SERVICE:
         return PERMISSION_GROUP_PHONE;
       case Manifest.permission.BODY_SENSORS:
         return PERMISSION_GROUP_SENSORS;
@@ -248,6 +253,16 @@ public class PermissionHandlerPlugin implements MethodCallHandler {
 
   @PermissionStatus
   private int checkPermissionStatus(@PermissionGroup int permission) {
+    final Context context = mRegistrar.activity() == null ? mRegistrar.activeContext() : mRegistrar.activity();
+    if (context == null) {
+      Log.d(LOG_TAG, "Unable to detect current Activity or App Context.");
+      return PERMISSION_STATUS_UNKNOWN;
+    }
+
+    if (permission == PERMISSION_GROUP_NOTIFICATION) {
+      return checkNotificationPermissionStatus(context);
+    }
+
     final List<String> names = getManifestNames(permission);
 
     if (names == null) {
@@ -259,12 +274,6 @@ public class PermissionHandlerPlugin implements MethodCallHandler {
     //if no permissions were found then there is an issue and permission is not set in Android manifest
     if (names.size() == 0) {
       Log.d(LOG_TAG, "No permissions found in manifest for: " + permission);
-      return PERMISSION_STATUS_UNKNOWN;
-    }
-
-    final Context context = mRegistrar.activity() == null ? mRegistrar.activeContext() : mRegistrar.activity();
-    if (context == null) {
-      Log.d(LOG_TAG, "Unable to detect current Activity or App Context.");
       return PERMISSION_STATUS_UNKNOWN;
     }
 
@@ -450,16 +459,19 @@ public class PermissionHandlerPlugin implements MethodCallHandler {
         if (!mRequestResults.containsKey(PERMISSION_GROUP_SPEECH)) {
           mRequestResults.put(PERMISSION_GROUP_SPEECH, toPermissionStatus(grantResults[i]));
         }
-      } else if (permission == PERMISSION_GROUP_LOCATION) {
-        final Context context = mRegistrar.activity() == null ? mRegistrar.activeContext() : mRegistrar.activity();
-        final boolean isLocationServiceEnabled = context != null && isLocationServiceEnabled(context);
-        @PermissionStatus int permissionStatus = toPermissionStatus(grantResults[i]);
-        if (permissionStatus == PERMISSION_STATUS_GRANTED && !isLocationServiceEnabled) {
-          permissionStatus = PERMISSION_STATUS_DISABLED;
-        }
+      } else if (permission == PERMISSION_GROUP_LOCATION_ALWAYS) {
+        @PermissionStatus int permissionStatus = determineActualLocationStatus(grantResults[i]);
 
         if (!mRequestResults.containsKey(PERMISSION_GROUP_LOCATION_ALWAYS)) {
           mRequestResults.put(PERMISSION_GROUP_LOCATION_ALWAYS, permissionStatus);
+        }
+      } else if (permission == PERMISSION_GROUP_LOCATION) {
+        @PermissionStatus int permissionStatus = determineActualLocationStatus(grantResults[i]);
+
+        if (VERSION.SDK_INT < VERSION_CODES.Q) {
+          if (!mRequestResults.containsKey(PERMISSION_GROUP_LOCATION_ALWAYS)) {
+            mRequestResults.put(PERMISSION_GROUP_LOCATION_ALWAYS, permissionStatus);
+          }
         }
 
         if (!mRequestResults.containsKey(PERMISSION_GROUP_LOCATION_WHEN_IN_USE)) {
@@ -473,6 +485,23 @@ public class PermissionHandlerPlugin implements MethodCallHandler {
     }
 
     processResult();
+  }
+
+  /**
+   * Crosschecks a permission grant result with the location service availability.
+   *
+   * @param grantResult Grant Result as received from the Android system.
+   */
+  @PermissionStatus
+  private int determineActualLocationStatus(int grantResult) {
+    final Context context =
+        mRegistrar.activity() == null ? mRegistrar.activeContext() : mRegistrar.activity();
+    final boolean isLocationServiceEnabled = context != null && isLocationServiceEnabled(context);
+    @PermissionStatus int permissionStatus = toPermissionStatus(grantResult);
+    if (permissionStatus == PERMISSION_STATUS_GRANTED && !isLocationServiceEnabled) {
+      permissionStatus = PERMISSION_STATUS_DISABLED;
+    }
+    return permissionStatus;
   }
 
   private void handleIgnoreBatteryOptimizationsRequest(boolean granted) {
@@ -551,6 +580,11 @@ public class PermissionHandlerPlugin implements MethodCallHandler {
         break;
 
       case PERMISSION_GROUP_LOCATION_ALWAYS:
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+          if (hasPermissionInManifest(Manifest.permission.ACCESS_BACKGROUND_LOCATION))
+            permissionNames.add(Manifest.permission.ACCESS_BACKGROUND_LOCATION);
+        }
+
       case PERMISSION_GROUP_LOCATION_WHEN_IN_USE:
       case PERMISSION_GROUP_LOCATION:
         if (hasPermissionInManifest(Manifest.permission.ACCESS_COARSE_LOCATION))
@@ -586,8 +620,9 @@ public class PermissionHandlerPlugin implements MethodCallHandler {
         if (hasPermissionInManifest(Manifest.permission.USE_SIP))
           permissionNames.add(Manifest.permission.USE_SIP);
 
-        if (hasPermissionInManifest(Manifest.permission.PROCESS_OUTGOING_CALLS))
-          permissionNames.add(Manifest.permission.PROCESS_OUTGOING_CALLS);
+        if (hasPermissionInManifest(Manifest.permission.BIND_CALL_REDIRECTION_SERVICE))
+          permissionNames.add(Manifest.permission.BIND_CALL_REDIRECTION_SERVICE);
+
         break;
 
       case PERMISSION_GROUP_SENSORS:
@@ -628,6 +663,7 @@ public class PermissionHandlerPlugin implements MethodCallHandler {
           permissionNames.add(Manifest.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
         break;
 
+      case PERMISSION_GROUP_NOTIFICATION:
       case PERMISSION_GROUP_MEDIA_LIBRARY:
       case PERMISSION_GROUP_PHOTOS:
       case PERMISSION_GROUP_REMINDERS:
@@ -698,5 +734,14 @@ public class PermissionHandlerPlugin implements MethodCallHandler {
       final String locationProviders = Settings.Secure.getString(context.getContentResolver(), Settings.Secure.LOCATION_PROVIDERS_ALLOWED);
       return !TextUtils.isEmpty(locationProviders);
     }
+  }
+
+  private int checkNotificationPermissionStatus(Context context) {
+    NotificationManagerCompat manager = NotificationManagerCompat.from(context);
+    boolean isGranted = manager.areNotificationsEnabled();
+    if (isGranted) {
+      return PERMISSION_STATUS_GRANTED;
+    }
+    return PERMISSION_STATUS_DENIED;
   }
 }
