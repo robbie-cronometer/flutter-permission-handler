@@ -6,13 +6,14 @@
 //
 
 typedef NS_ENUM(int, PermissionGroup) {
-    PermissionGroupCamera,
-    PermissionGroupMediaLibrary,
-    PermissionGroupPhotos,
-    PermissionGroupStorage,
-    PermissionGroupIgnoreBatteryOptimizations,
-    PermissionGroupUnknown,
+    PermissionGroupCamera = 1,
+    PermissionGroupMediaLibrary = 6,
+    PermissionGroupPhotos = 9,
+    PermissionGroupStorage = 14,
+    PermissionGroupIgnoreBatteryOptimizations = 15,
+    PermissionGroupUnknown = 16,
 };
+
 
 typedef NS_ENUM(int, PermissionStatus) {
     PermissionStatusDenied = 0,
